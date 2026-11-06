@@ -1000,7 +1000,15 @@ export default function App() {
               {selectedEmail.body}
             </div>
 
-            <div className="pt-4 border-t border-slate-800 flex justify-end">
+            <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2">
+              <button
+                onClick={(e) => toggleStar(e, selectedEmail.id)}
+                title={selectedEmail.starred ? 'Unstar' : 'Star'}
+                aria-label={selectedEmail.starred ? 'Unstar' : 'Star'}
+                className="min-h-11 min-w-11 flex items-center justify-center rounded-lg hover:bg-slate-800"
+              >
+                <Star className={`w-5 h-5 ${selectedEmail.starred ? 'fill-amber-400 text-amber-400' : 'text-slate-500'}`} />
+              </button>
               <button
                 onClick={(e) => { deleteEmail(e, selectedEmail.id); }}
                 className="min-h-11 px-3.5 py-2 rounded-lg text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 flex items-center justify-center gap-1.5"
