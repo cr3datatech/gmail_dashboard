@@ -556,11 +556,6 @@ export default function App() {
     }
   };
 
-  const moveCategory = (e, id, newCategory) => {
-    e.stopPropagation();
-    setEmails(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
-  };
-
   // Filtered emails based on search and account tab selection
   const filteredEmails = useMemo(() => {
     return emails.filter(email => {
@@ -796,7 +791,6 @@ export default function App() {
             onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
             onToggleStar={toggleStar}
             onDelete={deleteEmail}
-            onMoveCategory={moveCategory}
             darkMode={darkMode}
             description="Urgent items, direct requests & starred"
           />
@@ -814,7 +808,6 @@ export default function App() {
             onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
             onToggleStar={toggleStar}
             onDelete={deleteEmail}
-            onMoveCategory={moveCategory}
             darkMode={darkMode}
             description="Standard personal & team updates"
           />
@@ -832,7 +825,6 @@ export default function App() {
             onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
             onToggleStar={toggleStar}
             onDelete={deleteEmail}
-            onMoveCategory={moveCategory}
             darkMode={darkMode}
             description="Newsletters, promotions & automated alerts"
           />
@@ -1038,7 +1030,6 @@ function Column({
   onSelectEmail,
   onToggleStar,
   onDelete,
-  onMoveCategory,
   darkMode,
   description
 }) {
@@ -1097,21 +1088,8 @@ function Column({
               <h4 className="text-xs font-bold mb-1 line-clamp-1 text-slate-100">{email.subject}</h4>
               <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed mb-2.5">{email.snippet}</p>
 
-              <div className="flex items-center justify-between text-[10px] text-slate-400 pt-2 border-t border-slate-800/50">
+              <div className="text-[10px] text-slate-400 pt-2 border-t border-slate-800/50">
                 <span className="font-mono">{new Date(email.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                <div className="flex flex-wrap justify-end gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                  {['Action needed', 'FYI', 'Low priority'].map(cat => (
-                    cat !== title && (
-                      <button
-                        key={cat}
-                        onClick={(e) => onMoveCategory(e, email.id, cat)}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white transition-colors"
-                      >
-                        → {cat.split(' ')[0]}
-                      </button>
-                    )
-                  ))}
-                </div>
               </div>
             </div>
           ))
