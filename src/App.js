@@ -23,7 +23,7 @@ import {
 
 const CLIENT_ID_STORAGE_KEY = 'gmail-dashboard-client-id';
 const ACCOUNTS_STORAGE_KEY = 'gmail-dashboard-accounts';
-const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const TOKEN_SKEW_MS = 60 * 1000;
 const ACCOUNT_COLORS = [
   'bg-blue-600 border-blue-500 text-blue-100',
@@ -71,7 +71,8 @@ function loadAccounts() {
       const tokenExpiresAt = Number(acc.tokenExpiresAt) || 0;
       const keepSignedIn = acc.keepSignedIn === true;
       const session = { token, tokenExpiresAt };
-      const connected = keepSignedIn && tokenStillValid(session);
+      const scopeMatches = acc.grantedScope === GMAIL_SCOPE;
+      const connected = keepSignedIn && scopeMatches && tokenStillValid(session);
       return {
         id: String(acc.id || `acc_${index + 1}`),
         name: String(acc.name || `Inbox ${index + 1}`),
@@ -98,6 +99,7 @@ function persistAccounts(accounts) {
       email: acc.email,
       allowed: acc.allowed !== false,
       keepSignedIn: Boolean(acc.keepSignedIn),
+      grantedScope: valid ? GMAIL_SCOPE : '',
       token: valid ? acc.token : null,
       tokenExpiresAt: valid ? acc.tokenExpiresAt : 0
     };
@@ -183,6 +185,7 @@ export default function App() {
       connected: true,
       token: accessToken,
       tokenExpiresAt: Date.now() + seconds * 1000,
+      grantedScope: GMAIL_SCOPE,
       keepSignedIn: true
     } : acc));
     fetchRealEmailsForAccount(accountId, accountEmail, accessToken);
@@ -396,10 +399,33 @@ export default function App() {
     setEmails(prev => prev.map(item => item.id === id ? { ...item, read: true } : item));
   };
 
-  const deleteEmail = (e, id) => {
+  const deleteEmail = async (e, id) => {
     e.stopPropagation();
-    setEmails(prev => prev.filter(item => item.id !== id));
-    if (selectedEmail?.id === id) setSelectedEmail(null);
+    const email = emails.find(item => item.id === id);
+    const account = accounts.find(acc => acc.id === email?.accountId && acc.token);
+    if (!account) {
+      setApiError('Connect this inbox again before moving mail to Trash.');
+      return;
+    }
+    try {
+      const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/trash`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${account.token}` }
+      });
+      if (res.status === 401 || res.status === 403) {
+        setAccounts(prev => prev.map(acc => acc.id === account.id ? { ...acc, connected: false, token: null, tokenExpiresAt: 0, grantedScope: '' } : acc));
+        setApiError('Gmail refused Trash. Connect this inbox again so the new permission can be granted.');
+        return;
+      }
+      if (!res.ok) {
+        setApiError(`Could not move the message to Trash (${res.status}).`);
+        return;
+      }
+      setEmails(prev => prev.filter(item => item.id !== id));
+      if (selectedEmail?.id === id) setSelectedEmail(null);
+    } catch (err) {
+      setApiError(`Could not move the message to Trash: ${err.message}`);
+    }
   };
 
   const moveCategory = (e, id, newCategory) => {
@@ -848,7 +874,7 @@ export default function App() {
                 onClick={(e) => { deleteEmail(e, selectedEmail.id); }}
                 className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 flex items-center gap-1.5"
               >
-                <Trash2 className="w-3.5 h-3.5" /> Remove Card
+                <Trash2 className="w-3.5 h-3.5" /> Move to Trash
               </button>
             </div>
 
@@ -923,7 +949,7 @@ function Column({
                   <button onClick={(e) => onToggleStar(e, email.id)} className="p-1 hover:bg-slate-800 rounded">
                     <Star className={`w-3.5 h-3.5 ${email.starred ? 'fill-amber-400 text-amber-400' : 'text-slate-500'}`} />
                   </button>
-                  <button onClick={(e) => onDelete(e, email.id)} className="p-1 opacity-0 group-hover:opacity-100 text-rose-400 hover:bg-rose-500/20 rounded">
+                  <button onClick={(e) => onDelete(e, email.id)} title="Move to Trash" className="p-1 opacity-0 group-hover:opacity-100 text-rose-400 hover:bg-rose-500/20 rounded">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>

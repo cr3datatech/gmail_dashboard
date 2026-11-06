@@ -23,7 +23,7 @@ Disconnect an inbox to forget that sign-in. Changing an address or turning **All
 3. Add this site's origin to **Authorized JavaScript origins**. For local development that is `http://localhost:3000`. For Vercel, add the deployed `https://` origin as well.
 4. While the consent screen is in **Testing**, add each Gmail address under **Test users**.
 
-The app requests read-only Gmail access (`https://www.googleapis.com/auth/gmail.readonly`). Do not put an OAuth client secret in this project. The client ID is entered in **Setup** and stored only in the browser.
+The app requests `https://www.googleapis.com/auth/gmail.modify`. That scope reads mail and can move messages to Trash. Connect each inbox again after this change so Google grants the new permission. Do not put an OAuth client secret in this project. The client ID is entered in **Setup** and stored only in the browser.
 
 ## Run locally
 
