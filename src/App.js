@@ -10,6 +10,7 @@ import {
   Trash2, 
   Sun, 
   Moon, 
+  ShieldAlert,
   ShieldCheck, 
   Key, 
   LogIn,
@@ -344,45 +345,61 @@ export default function App() {
     setEmails(prev => prev.filter(e => e.accountId !== accountId));
   };
 
-  // Fetch real Gmail API messages using `q: in:inbox newer_than:30d`
+  const listRecentMessages = async (accessToken, query) => {
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (res.status === 401) {
+      const error = new Error('Sign-in expired. Connect this inbox again.');
+      error.status = 401;
+      throw error;
+    }
+    if (!res.ok) {
+      const error = new Error(`Gmail API returned status ${res.status}`);
+      error.status = res.status;
+      throw error;
+    }
+    const data = await res.json();
+    return data.messages || [];
+  };
+
+  // Fetch recent inbox mail and the spam folder. Each list is capped at 25.
   const fetchRealEmailsForAccount = async (accountId, accountEmail, accessToken) => {
     setIsRefreshing(true);
     setApiError(null);
     try {
-      // Endpoint with strict parameters to fetch only RECENT inbox items
-      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent('in:inbox newer_than:30d')}`;
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      });
-      
-      if (res.status === 401) {
+      const [inboxResult, spamResult] = await Promise.all([
+        listRecentMessages(accessToken, 'in:inbox newer_than:30d').then(messages => ({ messages })).catch(err => ({ err })),
+        listRecentMessages(accessToken, 'in:spam newer_than:30d').then(messages => ({ messages })).catch(err => ({ err }))
+      ]);
+      if (inboxResult.err?.status === 401 || spamResult.err?.status === 401) {
         setAccounts(prev => prev.map(acc => acc.id === accountId ? { ...acc, connected: false, token: null, tokenExpiresAt: 0 } : acc));
         throw new Error('Sign-in expired. Connect this inbox again.');
       }
-      if (!res.ok) {
-        throw new Error(`Gmail API returned status ${res.status}`);
-      }
+      if (inboxResult.err) throw inboxResult.err;
+      if (spamResult.err) setApiError(`Could not load spam for ${accountEmail}.`);
 
-      const data = await res.json();
-      if (data.messages && data.messages.length > 0) {
-        const fullMessages = await Promise.all(
-          data.messages.map(async (msg) => {
-            const detailRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}`, {
-              headers: { Authorization: `Bearer ${accessToken}` }
-            });
-            return detailRes.json();
-          })
-        );
+      const seen = new Set();
+      const messageIds = [...inboxResult.messages, ...(spamResult.messages || [])].filter(msg => {
+        if (seen.has(msg.id)) return false;
+        seen.add(msg.id);
+        return true;
+      });
+      const fullMessages = messageIds.length === 0 ? [] : await Promise.all(
+        messageIds.map(async (msg) => {
+          const detailRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}`, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+          });
+          return detailRes.ok ? detailRes.json() : null;
+        })
+      );
+      const parsedEmails = fullMessages.filter(Boolean).map(msg => parseGmailMessage(msg, accountId, accountEmail));
 
-        const parsedEmails = fullMessages.map(msg => parseGmailMessage(msg, accountId, accountEmail));
-        
-        // Merge and sort strictly by internalDate descending (newest first)
-        setEmails(prev => {
-          const filteredOther = prev.filter(e => e.accountId !== accountId);
-          const combined = [...filteredOther, ...parsedEmails];
-          return combined.sort((a, b) => b.internalDate - a.internalDate);
-        });
-      }
+      setEmails(prev => {
+        const filteredOther = prev.filter(e => e.accountId !== accountId);
+        return [...filteredOther, ...parsedEmails].sort((a, b) => b.internalDate - a.internalDate);
+      });
       setLastSynced(new Date().toLocaleTimeString());
     } catch (err) {
       setApiError(`Failed to fetch emails for ${accountEmail}: ${err.message}`);
@@ -406,7 +423,9 @@ export default function App() {
     const isStarred = msg.labelIds?.includes('STARRED') || false;
     const isImportant = msg.labelIds?.includes('IMPORTANT') || false;
     
-    if (isStarred || isImportant || subLower.includes('urgent') || subLower.includes('action') || subLower.includes('verify') || subLower.includes('required') || subLower.includes('review') || subLower.includes('deadline')) {
+    if (msg.labelIds?.includes('SPAM')) {
+      category = 'Spam';
+    } else if (isStarred || isImportant || subLower.includes('urgent') || subLower.includes('action') || subLower.includes('verify') || subLower.includes('required') || subLower.includes('review') || subLower.includes('deadline')) {
       category = 'Action needed';
     } else if (msg.labelIds?.includes('CATEGORY_PROMOTIONS') || msg.labelIds?.includes('CATEGORY_UPDATES') || subLower.includes('newsletter') || subLower.includes('unsubscribe') || subLower.includes('digest')) {
       category = 'Low priority';
@@ -492,7 +511,7 @@ export default function App() {
       return;
     }
     const nextStarred = !email.starred;
-    const nextCategory = nextStarred ? 'Action needed' : email.category;
+    const nextCategory = email.category === 'Spam' ? 'Spam' : (nextStarred ? 'Action needed' : email.category);
     applyStarState(id, nextStarred, nextCategory);
     try {
       const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/modify`, {
@@ -516,7 +535,7 @@ export default function App() {
       }
       const updated = await res.json();
       const starred = updated.labelIds?.includes('STARRED') ?? nextStarred;
-      applyStarState(id, starred, starred ? 'Action needed' : email.category);
+      applyStarState(id, starred, email.category === 'Spam' ? 'Spam' : (starred ? 'Action needed' : email.category));
     } catch (err) {
       applyStarState(id, email.starred, email.category);
       setApiError(`Could not update the star: ${err.message}`);
@@ -572,6 +591,7 @@ export default function App() {
   const actionEmails = useMemo(() => filteredEmails.filter(e => e.category === 'Action needed'), [filteredEmails]);
   const fyiEmails = useMemo(() => filteredEmails.filter(e => e.category === 'FYI'), [filteredEmails]);
   const lowPriorityEmails = useMemo(() => filteredEmails.filter(e => e.category === 'Low priority'), [filteredEmails]);
+  const spamEmails = useMemo(() => filteredEmails.filter(e => e.category === 'Spam'), [filteredEmails]);
 
   const accountLabel = (acc) => acc.name || (acc.email.includes('@') ? acc.email.split('@')[0] : 'Inbox');
 
@@ -776,7 +796,7 @@ export default function App() {
 
       {/* --- 4. THREE KANBAN COLUMNS --- */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
           
           {/* COLUMN 1: ACTION NEEDED */}
           <Column
@@ -827,6 +847,22 @@ export default function App() {
             onDelete={deleteEmail}
             darkMode={darkMode}
             description="Newsletters, promotions & automated alerts"
+          />
+
+          <Column
+            title="Spam"
+            count={spamEmails.length}
+            badgeBg="bg-amber-500"
+            bgColor="bg-amber-950/10"
+            borderColor="border-amber-900/40"
+            icon={<ShieldAlert className="w-5 h-5 text-amber-400" />}
+            emails={spamEmails}
+            getAccountBadge={getAccountBadge}
+            onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
+            onToggleStar={toggleStar}
+            onDelete={deleteEmail}
+            darkMode={darkMode}
+            description="Messages Gmail filed as spam"
           />
 
         </div>
@@ -955,6 +991,7 @@ export default function App() {
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                     selectedEmail.category === 'Action needed' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' :
                     selectedEmail.category === 'FYI' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' :
+                    selectedEmail.category === 'Spam' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
                     'bg-slate-700 text-slate-300'
                   }`}>
                     {selectedEmail.category}
