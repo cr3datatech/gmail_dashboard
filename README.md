@@ -1,3 +1,16 @@
+# Multi-Inbox Gmail Dashboard
+
+Open **Setup** and enter the Google client ID, inbox names, and Gmail addresses. Those values are saved in the browser, so a refresh keeps them. A successful sign-in is kept until Google expires the token, then the page asks Google to continue that sign-in.
+
+No environment file is required.
+
+## Deploy on Vercel
+
+1. Create a Google Cloud OAuth client of type **Web application** and enable the **Gmail API**.
+2. Import this repository in Vercel. The framework preset is Create React App.
+3. Add the deployed origin, such as `https://your-app.vercel.app`, to **Authorized JavaScript origins**. While the consent screen is in testing, add each Gmail address under **Test users**.
+4. After the site loads, open **Setup**, paste the client ID, and add the inboxes this browser may connect.
+
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).

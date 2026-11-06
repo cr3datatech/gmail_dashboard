@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Inbox, 
   RefreshCw, 
@@ -13,8 +13,7 @@ import {
   Moon, 
   ShieldCheck, 
   Key, 
-  Check, 
-  LogIn, 
+  LogIn,
   LogOut, 
   AlertTriangle,
   X,
@@ -22,21 +21,103 @@ import {
   User,
   Filter,
   CheckCircle2,
-  ChevronRight
+  ChevronRight,
+  Plus
 } from 'lucide-react';
 
-// --- TARGET GMAIL ACCOUNTS ---
-const INITIAL_ACCOUNTS = [
-  { id: 'acc_1', name: 'Inbox 1', email: '', color: 'bg-blue-600 border-blue-500 text-blue-100', connected: false, token: null },
-  { id: 'acc_2', name: 'Inbox 2', email: '', color: 'bg-emerald-600 border-emerald-500 text-emerald-100', connected: false, token: null },
-  { id: 'acc_3', name: 'Inbox 3', email: '', color: 'bg-amber-600 border-amber-500 text-amber-100', connected: false, token: null }
+const CLIENT_ID_STORAGE_KEY = 'gmail-dashboard-client-id';
+const ACCOUNTS_STORAGE_KEY = 'gmail-dashboard-accounts';
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+const TOKEN_SKEW_MS = 60 * 1000;
+const ACCOUNT_COLORS = [
+  'bg-blue-600 border-blue-500 text-blue-100',
+  'bg-emerald-600 border-emerald-500 text-emerald-100',
+  'bg-amber-600 border-amber-500 text-amber-100',
+  'bg-violet-600 border-violet-500 text-violet-100',
+  'bg-rose-600 border-rose-500 text-rose-100'
 ];
+
+function createAccount(index) {
+  return {
+    id: `acc_${Date.now()}_${index}`,
+    name: `Inbox ${index + 1}`,
+    email: '',
+    color: ACCOUNT_COLORS[index % ACCOUNT_COLORS.length],
+    allowed: true,
+    connected: false,
+    token: null,
+    tokenExpiresAt: 0,
+    keepSignedIn: false
+  };
+}
+
+function tokenStillValid(acc) {
+  return Boolean(acc?.token && acc.tokenExpiresAt && acc.tokenExpiresAt - TOKEN_SKEW_MS > Date.now());
+}
+
+function loadClientId() {
+  try {
+    return (localStorage.getItem(CLIENT_ID_STORAGE_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function loadAccounts() {
+  try {
+    const raw = localStorage.getItem(ACCOUNTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return [0, 1, 2].map(createAccount);
+    }
+    return parsed.map((acc, index) => {
+      const token = typeof acc.token === 'string' ? acc.token : '';
+      const tokenExpiresAt = Number(acc.tokenExpiresAt) || 0;
+      const keepSignedIn = acc.keepSignedIn === true;
+      const session = { token, tokenExpiresAt };
+      const connected = keepSignedIn && tokenStillValid(session);
+      return {
+        id: String(acc.id || `acc_${index + 1}`),
+        name: String(acc.name || `Inbox ${index + 1}`),
+        email: String(acc.email || ''),
+        color: ACCOUNT_COLORS[index % ACCOUNT_COLORS.length],
+        allowed: acc.allowed !== false,
+        connected,
+        token: connected ? token : null,
+        tokenExpiresAt: connected ? tokenExpiresAt : 0,
+        keepSignedIn
+      };
+    });
+  } catch {
+    return [0, 1, 2].map(createAccount);
+  }
+}
+
+function persistAccounts(accounts) {
+  const safe = accounts.map((acc) => {
+    const valid = tokenStillValid(acc);
+    return {
+      id: acc.id,
+      name: acc.name,
+      email: acc.email,
+      allowed: acc.allowed !== false,
+      keepSignedIn: Boolean(acc.keepSignedIn),
+      token: valid ? acc.token : null,
+      tokenExpiresAt: valid ? acc.tokenExpiresAt : 0
+    };
+  });
+  localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(safe));
+}
+
+function signedOutAccount(acc) {
+  return { ...acc, connected: false, token: null, tokenExpiresAt: 0, keepSignedIn: false };
+}
 
 // Sample fallback emails (for demo before OAuth sign in)
 const DEMO_EMAILS = [];
 
 export default function App() {
-  const [accounts, setAccounts] = useState(INITIAL_ACCOUNTS);
+  const [accounts, setAccounts] = useState(loadAccounts);
   const [selectedAccountId, setSelectedAccountId] = useState('ALL');
   const [emails, setEmails] = useState(DEMO_EMAILS);
   const [searchTerm, setSearchTerm] = useState('');
@@ -47,21 +128,38 @@ export default function App() {
   
   // OAuth & Modal State
   const [showConfigModal, setShowConfigModal] = useState(false);
-  const [clientId, setClientId] = useState('');
-  const [savedSuccess, setSavedSuccess] = useState(false);
   const [apiError, setApiError] = useState(null);
+  const [clientId, setClientId] = useState(loadClientId);
+  const [gsiReady, setGsiReady] = useState(false);
+  const accountsRef = useRef(accounts);
+  const restoredForClient = useRef('');
+  accountsRef.current = accounts;
+  const allowedAccounts = accounts.filter(acc => acc.allowed);
 
   // Load Google OAuth GSI Script
   useEffect(() => {
+    if (window.google?.accounts?.oauth2) {
+      setGsiReady(true);
+      return undefined;
+    }
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
     script.defer = true;
+    script.onload = () => setGsiReady(true);
     document.body.appendChild(script);
     return () => {
       document.body.removeChild(script);
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CLIENT_ID_STORAGE_KEY, clientId.trim());
+    } catch {
+      // Ignore storage failures; the in-memory value still works for this visit.
+    }
+  }, [clientId]);
 
   // Sync dark mode class with standard root element
   useEffect(() => {
@@ -72,43 +170,88 @@ export default function App() {
     }
   }, [darkMode]);
 
+  useEffect(() => {
+    persistAccounts(accounts);
+  }, [accounts]);
+
+  useEffect(() => {
+    if (selectedAccountId !== 'ALL' && !accounts.some(acc => acc.id === selectedAccountId && acc.allowed)) {
+      setSelectedAccountId('ALL');
+    }
+  }, [accounts, selectedAccountId]);
+
+  const applyAccessToken = (accountId, accountEmail, accessToken, expiresIn) => {
+    const seconds = Number(expiresIn) > 0 ? Number(expiresIn) : 3600;
+    setAccounts(prev => prev.map(acc => acc.id === accountId ? {
+      ...acc,
+      connected: true,
+      token: accessToken,
+      tokenExpiresAt: Date.now() + seconds * 1000,
+      keepSignedIn: true
+    } : acc));
+    fetchRealEmailsForAccount(accountId, accountEmail, accessToken);
+  };
+
+  const requestGoogleToken = (account, { silent }) => {
+    const activeClientId = clientId.trim();
+    if (!activeClientId || !account?.email) return;
+    if (!window.google?.accounts?.oauth2) {
+      if (!silent) setApiError('Google sign-in is still loading. Try again in a few seconds.');
+      return;
+    }
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: activeClientId,
+      scope: GMAIL_SCOPE,
+      hint: account.email,
+      callback: (response) => {
+        if (response.access_token) {
+          applyAccessToken(account.id, account.email, response.access_token, response.expires_in);
+          return;
+        }
+        if (silent) return;
+        if (response.error) setApiError(`OAuth Error: ${response.error}`);
+      }
+    });
+    client.requestAccessToken(silent ? { prompt: '' } : undefined);
+  };
+
   // Initiate OAuth Sign-In for a specific account
   const handleConnectAccount = (accountEmail, accountId) => {
-    if (!clientId) {
+    const account = accounts.find(acc => acc.id === accountId);
+    if (!clientId.trim()) {
       setShowConfigModal(true);
+      setApiError('Add a Google client ID in Setup. It stays in this browser.');
+      return;
+    }
+    if (!account?.allowed) {
+      setShowConfigModal(true);
+      setApiError('Allow this inbox before connecting.');
       return;
     }
     if (!accountEmail) {
+      setShowConfigModal(true);
       setApiError('Enter a Gmail address for this inbox before connecting.');
       return;
     }
-
-    if (window.google && window.google.accounts && window.google.accounts.oauth2) {
-      const client = window.google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: 'https://www.googleapis.com/auth/gmail.readonly',
-        hint: accountEmail,
-        callback: (response) => {
-          if (response.access_token) {
-            setAccounts(prev => prev.map(acc => 
-              acc.id === accountId ? { ...acc, connected: true, token: response.access_token } : acc
-            ));
-            fetchRealEmailsForAccount(accountId, accountEmail, response.access_token);
-          } else if (response.error) {
-            setApiError(`OAuth Error: ${response.error}`);
-          }
-        },
-      });
-      client.requestAccessToken();
-    } else {
-      setApiError("Google OAuth SDK is still loading. Please try again in 5 seconds.");
-    }
+    requestGoogleToken({ ...account, email: accountEmail }, { silent: false });
   };
 
+  useEffect(() => {
+    const activeClientId = clientId.trim();
+    if (!gsiReady || !activeClientId || restoredForClient.current === activeClientId) return;
+    restoredForClient.current = activeClientId;
+    accountsRef.current.forEach((acc) => {
+      if (!acc.allowed || !acc.email || !acc.keepSignedIn) return;
+      if (tokenStillValid(acc)) {
+        fetchRealEmailsForAccount(acc.id, acc.email, acc.token);
+        return;
+      }
+      requestGoogleToken(acc, { silent: true });
+    });
+  }, [gsiReady, clientId]);
+
   const handleDisconnectAccount = (accountId) => {
-    setAccounts(prev => prev.map(acc => 
-      acc.id === accountId ? { ...acc, connected: false, token: null } : acc
-    ));
+    setAccounts(prev => prev.map(acc => acc.id === accountId ? signedOutAccount(acc) : acc));
     setEmails(prev => prev.filter(e => e.accountId !== accountId));
   };
 
@@ -123,6 +266,10 @@ export default function App() {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       
+      if (res.status === 401) {
+        setAccounts(prev => prev.map(acc => acc.id === accountId ? { ...acc, connected: false, token: null, tokenExpiresAt: 0 } : acc));
+        throw new Error('Sign-in expired. Connect this inbox again.');
+      }
       if (!res.ok) {
         throw new Error(`Gmail API returned status ${res.status}`);
       }
@@ -212,10 +359,34 @@ export default function App() {
     });
   };
 
-  const handleSaveClientId = (e) => {
-    e.preventDefault();
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 3000);
+  const updateAccount = (id, patch) => {
+    const current = accounts.find(acc => acc.id === id);
+    const emailChanged = Boolean(current && patch.email !== undefined && patch.email !== current.email);
+    const shouldDisconnect = patch.allowed === false || emailChanged;
+    setAccounts(prev => prev.map(acc => {
+      if (acc.id !== id) return acc;
+      const next = { ...acc, ...patch };
+      if (shouldDisconnect) {
+        next.connected = false;
+        next.token = null;
+        next.tokenExpiresAt = 0;
+        next.keepSignedIn = false;
+      }
+      return next;
+    }));
+    if (shouldDisconnect) {
+      setEmails(prev => prev.filter(email => email.accountId !== id));
+    }
+  };
+
+  const addAccount = () => {
+    setAccounts(prev => [...prev, createAccount(prev.length)]);
+  };
+
+  const removeAccount = (id) => {
+    setAccounts(prev => prev.filter(acc => acc.id !== id));
+    setEmails(prev => prev.filter(email => email.accountId !== id));
+    if (selectedAccountId === id) setSelectedAccountId('ALL');
   };
 
   const toggleStar = (e, id) => {
@@ -255,7 +426,7 @@ export default function App() {
   const fyiEmails = useMemo(() => filteredEmails.filter(e => e.category === 'FYI'), [filteredEmails]);
   const lowPriorityEmails = useMemo(() => filteredEmails.filter(e => e.category === 'Low priority'), [filteredEmails]);
 
-  const accountLabel = (acc) => (acc.email.includes('@') ? acc.email.split('@')[0] : acc.name);
+  const accountLabel = (acc) => acc.name || (acc.email.includes('@') ? acc.email.split('@')[0] : 'Inbox');
 
   const getAccountBadge = (accId) => {
     const acc = accounts.find(a => a.id === accId);
@@ -312,7 +483,7 @@ export default function App() {
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg text-amber-950 bg-amber-400 hover:bg-amber-300 dark:bg-amber-500 dark:text-slate-950 dark:hover:bg-amber-400 shadow-xs transition-all active:scale-95"
             >
               <Key className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">API & OAuth Setup</span>
+              <span className="hidden sm:inline">Setup</span>
             </button>
 
             {/* Refresh Inboxes Button */}
@@ -349,7 +520,7 @@ export default function App() {
               <ShieldCheck className="w-3.5 h-3.5 text-blue-500" /> Accounts:
             </span>
 
-            {accounts.map(acc => (
+            {allowedAccounts.map(acc => (
               <div 
                 key={acc.id}
                 className={`px-2.5 py-1.5 rounded-xl border flex items-center gap-2 shadow-xs transition-all text-xs ${
@@ -359,18 +530,10 @@ export default function App() {
                 }`}
               >
                 <span className={`w-2 h-2 rounded-full shrink-0 ${acc.connected ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'}`}></span>
-                {acc.connected ? (
-                  <span className="font-semibold truncate max-w-[170px]">{acc.email}</span>
-                ) : (
-                  <input
-                    type="email"
-                    value={acc.email}
-                    onChange={(e) => setAccounts(prev => prev.map(a => a.id === acc.id ? { ...a, email: e.target.value } : a))}
-                    placeholder="you@gmail.com"
-                    aria-label={`${acc.name} Gmail address`}
-                    className={`w-36 bg-transparent font-semibold truncate focus:outline-none ${darkMode ? 'placeholder-slate-500' : 'placeholder-slate-400'}`}
-                  />
-                )}
+                <span className="min-w-0">
+                  <span className="block font-semibold truncate max-w-[150px]">{acc.name}</span>
+                  <span className="block text-[10px] text-slate-400 truncate max-w-[150px]">{acc.email || 'No address yet'}</span>
+                </span>
 
                 {acc.connected ? (
                   <button
@@ -390,6 +553,14 @@ export default function App() {
                 )}
               </div>
             ))}
+            {allowedAccounts.length === 0 && (
+              <button
+                onClick={() => setShowConfigModal(true)}
+                className="px-2.5 py-1.5 text-xs font-semibold rounded-xl border border-dashed border-slate-600 text-slate-400 hover:text-slate-200"
+              >
+                Allow an inbox to connect
+              </button>
+            )}
           </div>
 
           {/* Account View Filter Tabs & Last Synced */}
@@ -405,7 +576,7 @@ export default function App() {
               >
                 All Accounts ({emails.length})
               </button>
-              {accounts.map(acc => (
+              {allowedAccounts.map(acc => (
                 <button
                   key={acc.id}
                   onClick={() => setSelectedAccountId(acc.id)}
@@ -503,10 +674,10 @@ export default function App() {
         </div>
       </main>
 
-      {/* --- 3. MODAL: OAUTH CLIENT ID CONFIGURATION --- */}
+      {/* --- 3. MODAL: ACCOUNT NAMES AND ALLOW LIST --- */}
       {showConfigModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-fadeIn">
-          <div className={`w-full max-w-xl rounded-2xl shadow-2xl border p-6 overflow-hidden ${darkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'}`}>
+          <div className={`w-full max-w-xl rounded-2xl shadow-2xl border p-6 overflow-hidden max-h-[85vh] flex flex-col ${darkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'}`}>
             
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
               <div className="flex items-center space-x-2.5">
@@ -514,48 +685,87 @@ export default function App() {
                   <Key className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold leading-tight">Google OAuth 2.0 Configuration</h3>
-                  <p className="text-xs text-slate-400">Manage Client ID for live Gmail API access</p>
+                  <h3 className="text-base font-bold leading-tight">Setup</h3>
+                  <p className="text-xs text-slate-400">Saved in this browser across refreshes</p>
                 </div>
               </div>
               <button onClick={() => setShowConfigModal(false)} className="text-slate-400 hover:text-slate-200 font-bold text-lg">✕</button>
             </div>
 
-            <div className="py-4 space-y-4 text-xs">
-              <form onSubmit={handleSaveClientId} className="space-y-2">
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  Google Cloud Web Client ID
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={clientId}
-                    onChange={(e) => setClientId(e.target.value)}
-                    placeholder="Enter Client ID..."
-                    className={`flex-1 px-3 py-2 text-xs font-mono rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 ${
-                      darkMode ? 'bg-slate-950 border-slate-700 text-amber-300' : 'bg-slate-50 border-slate-300 text-slate-900'
-                    }`}
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 font-bold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors flex items-center gap-1"
-                  >
-                    <Check className="w-4 h-4" /> Save
-                  </button>
-                </div>
-                {savedSuccess && (
-                  <p className="text-xs text-emerald-400 font-semibold flex items-center gap-1 pt-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Client ID saved successfully!
-                  </p>
-                )}
-              </form>
+            <div className="py-4 space-y-4 text-xs overflow-y-auto">
+              <label className="block space-y-1.5">
+                <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">Google client ID</span>
+                <input
+                  type="text"
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  placeholder="1234567890-abc.apps.googleusercontent.com"
+                  autoComplete="off"
+                  spellCheck="false"
+                  aria-label="Google client ID"
+                  className={`w-full px-3 py-2 text-xs font-mono rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 ${
+                    darkMode ? 'bg-slate-950 border-slate-700 text-amber-200 placeholder-slate-600' : 'bg-slate-50 border-slate-300 text-slate-900'
+                  }`}
+                />
+                <span className="block text-[11px] text-slate-400">Enter this once. It stays in this browser and is not read from an env file.</span>
+              </label>
+
+              <div className="space-y-2">
+                {accounts.map(acc => (
+                  <div key={acc.id} className={`p-3 rounded-xl border space-y-2 ${darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={acc.name}
+                        onChange={(e) => updateAccount(acc.id, { name: e.target.value })}
+                        aria-label="Inbox name"
+                        className={`flex-1 px-3 py-2 text-xs font-semibold rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                          darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'
+                        }`}
+                      />
+                      <label className="flex items-center gap-1.5 shrink-0 text-[11px] font-bold text-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={acc.allowed}
+                          onChange={(e) => updateAccount(acc.id, { allowed: e.target.checked })}
+                        />
+                        Allowed
+                      </label>
+                      <button
+                        onClick={() => removeAccount(acc.id)}
+                        className="p-1.5 rounded-lg text-rose-400 hover:bg-rose-500/20"
+                        title="Remove inbox"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <input
+                      type="email"
+                      value={acc.email}
+                      onChange={(e) => updateAccount(acc.id, { email: e.target.value })}
+                      placeholder="you@gmail.com"
+                      aria-label={`${acc.name} Gmail address`}
+                      className={`w-full px-3 py-2 text-xs font-mono rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                        darkMode ? 'bg-slate-900 border-slate-700 text-slate-100 placeholder-slate-500' : 'bg-white border-slate-300 text-slate-900'
+                      }`}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <button
+                onClick={addAccount}
+                className="w-full px-3 py-2 rounded-lg border border-dashed border-slate-600 text-slate-300 hover:text-white hover:border-slate-400 font-semibold flex items-center justify-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add inbox
+              </button>
 
               <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2">
-                <h4 className="font-bold text-amber-400">Quick Google Console Checklist:</h4>
+                <h4 className="font-bold text-amber-400">Google Cloud checklist</h4>
                 <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px] leading-relaxed">
-                  <li>Ensure <strong>Gmail API</strong> is enabled in Google Cloud Console.</li>
-                  <li>Add each Gmail account you connect under <strong>OAuth Consent Screen &gt; Test Users</strong>.</li>
-                  <li>Add your current web preview origin to <strong>Authorized JavaScript origins</strong>.</li>
+                  <li>Enable the <strong>Gmail API</strong> on the same Google Cloud project as the client ID.</li>
+                  <li>Add every allowed Gmail address under <strong>OAuth consent screen &gt; Test users</strong> while the app is in testing.</li>
+                  <li>Add this site&apos;s origin, including the Vercel URL, under <strong>Authorized JavaScript origins</strong>.</li>
                 </ol>
               </div>
             </div>
