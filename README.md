@@ -1,83 +1,48 @@
 # Multi-Inbox Gmail Dashboard
 
-Open **Setup** and enter the Google client ID, inbox names, and Gmail addresses. Those values are saved in the browser, so a refresh keeps them. A successful sign-in is kept until Google expires the token, then the page asks Google to continue that sign-in.
+A browser dashboard for several Gmail inboxes. Mail from the last 30 days is sorted into **Action needed**, **FYI**, and **Low priority**.
 
-No environment file is required.
+Each person configures the app in their own browser. Nothing secret belongs in this repository.
+
+## Setup in the app
+
+Open **Setup** and enter:
+
+- The Google **web client ID**
+- Each inbox name and Gmail address
+- **Allowed** for the inboxes this browser may connect
+
+Those values stay in this browser across refreshes. Connect an inbox once. The sign-in is kept until Google expires the access token (about an hour). After that, the page asks Google to continue the existing sign-in.
+
+Disconnect an inbox to forget that sign-in. Changing an address or turning **Allowed** off also signs that inbox out.
+
+## Google Cloud
+
+1. Create an OAuth client of type **Web application**.
+2. Enable the **Gmail API** on the same project.
+3. Add this site's origin to **Authorized JavaScript origins**. For local development that is `http://localhost:3000`. For Vercel, add the deployed `https://` origin as well.
+4. While the consent screen is in **Testing**, add each Gmail address under **Test users**.
+
+The app requests read-only Gmail access (`https://www.googleapis.com/auth/gmail.readonly`). Do not put an OAuth client secret in this project. The client ID is entered in **Setup** and stored only in the browser.
+
+## Run locally
+
+```bash
+npm install
+npm start
+```
+
+The app opens at [http://localhost:3000](http://localhost:3000).
+
+| Script | What it does |
+| --- | --- |
+| `npm start` | Development server |
+| `npm test` | Test runner |
+| `npm run build` | Production build in `build/` |
 
 ## Deploy on Vercel
 
-1. Create a Google Cloud OAuth client of type **Web application** and enable the **Gmail API**.
-2. Import this repository in Vercel. The framework preset is Create React App.
-3. Add the deployed origin, such as `https://your-app.vercel.app`, to **Authorized JavaScript origins**. While the consent screen is in testing, add each Gmail address under **Test users**.
-4. After the site loads, open **Setup**, paste the client ID, and add the inboxes this browser may connect.
-
-# Getting Started with Create React App
-
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
-
-## Available Scripts
-
-In the project directory, you can run:
-
-### `npm start`
-
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
-
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
-
-### `npm test`
-
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
-
-### `npm run build`
-
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
-
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+1. Import this repository. The framework preset is Create React App.
+2. Do not add environment variables for the client ID.
+3. Add the deployed origin to the OAuth client's **Authorized JavaScript origins**.
+4. Open the site, choose **Setup**, and paste the client ID and inboxes for that browser.
