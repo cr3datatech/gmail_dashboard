@@ -12,7 +12,7 @@ Open **Setup** and enter:
 - Each inbox name and Gmail address
 - **Allowed** for the inboxes this browser may connect
 
-Those values stay in this browser across refreshes. Connect an inbox once. The sign-in is kept until Google expires the access token (about an hour). After that, the page asks Google to continue the existing sign-in.
+Those values stay in this browser across refreshes. Connect an inbox once. Google access tokens last about an hour. When you return to the tab, or shortly before a token expires, the page asks Google for a new one without a consent screen. Click **Connect** only if Google cannot renew that sign-in.
 
 Disconnect an inbox to forget that sign-in. Changing an address or turning **Allowed** off also signs that inbox out.
 
@@ -20,7 +20,9 @@ Disconnect an inbox to forget that sign-in. Changing an address or turning **All
 
 1. Create an OAuth client of type **Web application**.
 2. Enable the **Gmail API** on the same project.
-3. Add this site's origin to **Authorized JavaScript origins**. For local development that is `http://localhost:3000`. For Vercel, add the deployed `https://` origin as well.
+3. On that same Web client, add both of these. Google returns `invalid_client` ("The OAuth client was not found") when either is missing or the pasted value is not this client's **Client ID**:
+   - **Authorized JavaScript origins:** `http://localhost:3000` and `https://gmail-dashboard-red.vercel.app`
+   - **Authorized redirect URIs:** `http://localhost:3000/` and `https://gmail-dashboard-red.vercel.app/`
 4. While the consent screen is in **Testing**, add each Gmail address under **Test users**.
 
 The app requests `https://www.googleapis.com/auth/gmail.modify`. That scope reads mail and can move messages to Trash. Connect each inbox again after this change so Google grants the new permission. Do not put an OAuth client secret in this project. The client ID is entered in **Setup** and stored only in the browser.
