@@ -3,7 +3,6 @@ import {
   Inbox, 
   RefreshCw, 
   Search, 
-  Mail, 
   AlertCircle, 
   Info, 
   Tag, 
@@ -18,10 +17,7 @@ import {
   AlertTriangle,
   X,
   Clock,
-  User,
-  Filter,
   CheckCircle2,
-  ChevronRight,
   Plus
 } from 'lucide-react';
 
@@ -248,6 +244,8 @@ export default function App() {
       }
       requestGoogleToken(acc, { silent: true });
     });
+    // Accounts come from a ref, and this restore runs once per client ID.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gsiReady, clientId]);
 
   const handleDisconnectAccount = (accountId) => {
