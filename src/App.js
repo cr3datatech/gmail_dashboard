@@ -53,6 +53,15 @@ function tokenStillValid(acc) {
   return Boolean(acc?.token && acc.tokenExpiresAt && acc.tokenExpiresAt - TOKEN_SKEW_MS > Date.now());
 }
 
+// Largest timestamp a JS Date can hold; anything beyond it is an invalid date.
+const MAX_DATE_MS = 8.64e15;
+
+// Returns epoch ms for a number or date string, or null when it can't be used as a date.
+function toValidTime(value) {
+  const ms = typeof value === 'number' ? value : new Date(value).getTime();
+  return Number.isFinite(ms) && ms > 0 && ms <= MAX_DATE_MS ? ms : null;
+}
+
 function normalizeClientId(value) {
   return String(value || '').replace(/\s+/g, '').trim().toLowerCase();
 }
@@ -414,8 +423,13 @@ export default function App() {
     
     const subject = getHeader('Subject') || '(No Subject)';
     const from = getHeader('From') || 'Unknown Sender';
-    const dateStr = getHeader('Date') || new Date().toISOString();
-    const internalDate = Number(msg.internalDate) || new Date(dateStr).getTime();
+    // Prefer Gmail's receive time, then the Date header. Some mail has neither in a usable
+    // form, and an invalid date would make toISOString() throw and fail the whole sync.
+    let internalDate = toValidTime(Number(msg.internalDate)) ?? toValidTime(getHeader('Date'));
+    if (internalDate === null) {
+      console.warn(`Message ${msg.id} has no usable date (internalDate=${msg.internalDate}, Date header=${getHeader('Date')}); using the current time.`);
+      internalDate = Date.now();
+    }
     
     // Auto-categorization algorithm
     let category = 'FYI';
