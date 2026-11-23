@@ -150,6 +150,8 @@ export default function App() {
   // OAuth & Modal State
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [apiError, setApiError] = useState(null);
+  const [pendingDeleteColumn, setPendingDeleteColumn] = useState(null);
+  const [isDeletingColumn, setIsDeletingColumn] = useState(false);
   const [clientId, setClientId] = useState(loadClientId);
   const [gsiReady, setGsiReady] = useState(false);
   const accountsRef = useRef(accounts);
@@ -589,6 +591,98 @@ export default function App() {
     }
   };
 
+  const askDeleteColumn = (title, columnEmails) => {
+    setPendingDeleteColumn({ title, emails: columnEmails });
+  };
+
+  const pendingDeleteKeys = pendingDeleteColumn
+    ? new Set(pendingDeleteColumn.emails.map(email => `${email.accountId}:${email.id}`))
+    : new Set();
+  const pendingDeleteTargets = emails.filter(email => pendingDeleteKeys.has(`${email.accountId}:${email.id}`) && !email.starred);
+  const pendingDeleteStarred = emails.filter(email => pendingDeleteKeys.has(`${email.accountId}:${email.id}`) && email.starred).length;
+
+  const deleteColumnEmails = async () => {
+    if (!pendingDeleteColumn || isDeletingColumn) return;
+    const targets = pendingDeleteTargets;
+    if (targets.length === 0) {
+      setPendingDeleteColumn(null);
+      return;
+    }
+
+    setIsDeletingColumn(true);
+    const groups = new Map();
+    targets.forEach(email => {
+      const ids = groups.get(email.accountId) || [];
+      ids.push(email.id);
+      groups.set(email.accountId, ids);
+    });
+
+    const trashed = new Set();
+    const failed = [];
+    const disconnected = [];
+    const missingAccount = [];
+    const authFailed = [];
+
+    await Promise.all([...groups.entries()].map(async ([accountId, ids]) => {
+      const account = accountsRef.current.find(acc => acc.id === accountId && acc.token);
+      if (!account) {
+        missingAccount.push(...ids);
+        return;
+      }
+      let blocked = false;
+      const queue = ids.slice();
+      const workers = Array.from({ length: Math.min(5, queue.length) }, async () => {
+        while (queue.length) {
+          const id = queue.shift();
+          if (blocked) return;
+          try {
+            const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/trash`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${account.token}` }
+            });
+            if (res.status === 401 || res.status === 403) {
+              blocked = true;
+              disconnected.push(account.id);
+              authFailed.push(`${accountId}:${id}`);
+              return;
+            }
+            if (!res.ok) {
+              failed.push(`${accountId}:${id}`);
+              return;
+            }
+            trashed.add(`${accountId}:${id}`);
+          } catch {
+            failed.push(`${accountId}:${id}`);
+          }
+        }
+      });
+      await Promise.all(workers);
+    }));
+
+    if (disconnected.length) {
+      const ids = new Set(disconnected);
+      setAccounts(prev => prev.map(acc => ids.has(acc.id)
+        ? { ...acc, connected: false, token: null, tokenExpiresAt: 0, grantedScope: '' }
+        : acc));
+    }
+    if (trashed.size) {
+      setEmails(prev => prev.filter(item => !trashed.has(`${item.accountId}:${item.id}`)));
+      setSelectedEmail(prev => (prev && trashed.has(`${prev.accountId}:${prev.id}`) ? null : prev));
+    }
+
+    if (authFailed.length || failed.length || missingAccount.length) {
+      const parts = [];
+      if (trashed.size) parts.push(`Moved ${trashed.size} ${trashed.size === 1 ? 'email' : 'emails'} to Trash.`);
+      if (disconnected.length) parts.push('Gmail refused Trash. Connect that inbox again so the permission can be granted.');
+      if (missingAccount.length) parts.push('Connect each inbox again before moving its mail to Trash.');
+      if (failed.length) parts.push(`${failed.length} ${failed.length === 1 ? 'email' : 'emails'} could not be moved to Trash.`);
+      setApiError(parts.join(' '));
+    }
+
+    setIsDeletingColumn(false);
+    setPendingDeleteColumn(null);
+  };
+
   // Filtered emails based on search and account tab selection
   const filteredEmails = useMemo(() => {
     return emails.filter(email => {
@@ -842,6 +936,7 @@ export default function App() {
             onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
             onToggleStar={toggleStar}
             onDelete={deleteEmail}
+            onDeleteAll={askDeleteColumn}
             darkMode={darkMode}
             description="Standard personal & team updates"
           />
@@ -859,6 +954,7 @@ export default function App() {
             onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
             onToggleStar={toggleStar}
             onDelete={deleteEmail}
+            onDeleteAll={askDeleteColumn}
             darkMode={darkMode}
             description="Newsletters, promotions & automated alerts"
           />
@@ -875,6 +971,7 @@ export default function App() {
             onSelectEmail={(email) => { markAsRead(email.id); setSelectedEmail(email); }}
             onToggleStar={toggleStar}
             onDelete={deleteEmail}
+            onDeleteAll={askDeleteColumn}
             darkMode={darkMode}
             description="Messages Gmail filed as spam"
           />
@@ -1064,6 +1161,41 @@ export default function App() {
         </div>
       )}
 
+      {pendingDeleteColumn && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs" role="dialog" aria-modal="true" aria-labelledby="delete-column-title">
+          <div className={`w-full max-w-md rounded-2xl shadow-2xl border p-5 ${darkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <h3 id="delete-column-title" className="text-base font-bold">Delete all in {pendingDeleteColumn.title}?</h3>
+            <p className={`mt-2 text-sm ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+              Are you sure you want to delete all emails in {pendingDeleteColumn.title}? Starred emails are excluded.
+            </p>
+            <p className={`mt-2 text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+              {pendingDeleteTargets.length === 0
+                ? 'There are no emails to delete.'
+                : `${pendingDeleteTargets.length} ${pendingDeleteTargets.length === 1 ? 'email' : 'emails'} will be moved to Trash.`}
+              {pendingDeleteStarred > 0 ? ` ${pendingDeleteStarred} starred ${pendingDeleteStarred === 1 ? 'email stays' : 'emails stay'}.` : ''}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { if (!isDeletingColumn) setPendingDeleteColumn(null); }}
+                disabled={isDeletingColumn}
+                className={`min-h-10 px-3.5 rounded-lg text-xs font-bold disabled:opacity-50 ${darkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-600 hover:bg-slate-100'}`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={deleteColumnEmails}
+                disabled={isDeletingColumn || pendingDeleteTargets.length === 0}
+                className="min-h-10 px-3.5 rounded-lg text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 disabled:opacity-50"
+              >
+                {isDeletingColumn ? 'Deleting…' : 'Delete all'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1081,6 +1213,7 @@ function Column({
   onSelectEmail,
   onToggleStar,
   onDelete,
+  onDeleteAll,
   darkMode,
   description
 }) {
@@ -1088,10 +1221,10 @@ function Column({
     <div className={`flex flex-col rounded-2xl border ${borderColor} ${bgColor} overflow-hidden shadow-xs`}>
       
       {/* Column Header */}
-      <div className={`p-4 border-b ${darkMode ? 'border-slate-800 bg-slate-900/80' : 'border-slate-200 bg-white/80'} backdrop-blur-xs flex items-center justify-between`}>
-        <div className="flex items-center space-x-2.5">
+      <div className={`p-4 border-b ${darkMode ? 'border-slate-800 bg-slate-900/80' : 'border-slate-200 bg-white/80'} backdrop-blur-xs flex items-center justify-between gap-2`}>
+        <div className="flex items-center space-x-2.5 min-w-0">
           {icon}
-          <div>
+          <div className="min-w-0">
             <h3 className="font-bold text-sm tracking-tight flex items-center gap-2">
               {title}
               <span className={`text-xs px-2 py-0.5 rounded-full font-extrabold ${badgeBg} text-white`}>
@@ -1101,6 +1234,17 @@ function Column({
             <p className="text-[11px] text-slate-400">{description}</p>
           </div>
         </div>
+        {onDeleteAll && (
+          <button
+            type="button"
+            onClick={() => onDeleteAll(title, emails)}
+            title="Delete all"
+            aria-label={`Delete all emails in ${title}`}
+            className="shrink-0 min-h-10 min-w-10 flex items-center justify-center text-rose-400 hover:bg-rose-500/20 rounded"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
 
       {/* Column Email Card List */}
