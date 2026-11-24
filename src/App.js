@@ -25,7 +25,15 @@ import {
 const CLIENT_ID_STORAGE_KEY = 'gmail-dashboard-client-id';
 const ACCOUNTS_STORAGE_KEY = 'gmail-dashboard-accounts';
 const OAUTH_PENDING_KEY = 'gmail-dashboard-oauth-pending';
+const YAHOO_CLIENT_ID_KEY = 'gmail-dashboard-yahoo-client-id';
+const YAHOO_CLIENT_SECRET_KEY = 'gmail-dashboard-yahoo-client-secret';
+const YAHOO_PENDING_KEY = 'gmail-dashboard-yahoo-pending';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+const SETUP_TABS = [
+  { id: 'accounts', label: 'Email accounts' },
+  { id: 'google', label: 'Gmail' },
+  { id: 'yahoo', label: 'Yahoo' }
+];
 const TOKEN_SKEW_MS = 60 * 1000;
 const ACCOUNT_COLORS = [
   'bg-blue-600 border-blue-500 text-blue-100',
@@ -74,6 +82,26 @@ function loadClientId() {
   }
 }
 
+function compactCredential(value) {
+  return String(value || '').replace(/\s+/g, '').trim();
+}
+
+function loadStoredCredential(key) {
+  try {
+    return compactCredential(localStorage.getItem(key));
+  } catch {
+    return '';
+  }
+}
+
+function mailProvider(email) {
+  const domain = String(email || '').trim().toLowerCase().split('@')[1] || '';
+  if (domain === 'gmail.com' || domain === 'googlemail.com') return 'google';
+  if (domain === 'ymail.com' || domain === 'rocketmail.com' || domain === 'yahoo.com' || domain.startsWith('yahoo.')) return 'yahoo';
+  if (domain === 'outlook.com' || domain === 'hotmail.com' || domain === 'live.com' || domain === 'msn.com') return 'microsoft';
+  return '';
+}
+
 function loadAccounts() {
   try {
     const raw = localStorage.getItem(ACCOUNTS_STORAGE_KEY);
@@ -87,16 +115,22 @@ function loadAccounts() {
       const keepSignedIn = acc.keepSignedIn === true;
       const session = { token, tokenExpiresAt };
       const scopeMatches = acc.grantedScope === GMAIL_SCOPE;
-      const connected = keepSignedIn && scopeMatches && tokenStillValid(session);
+      const provider = acc.provider === 'yahoo' ? 'yahoo' : 'google';
+      const refreshToken = provider === 'yahoo' && typeof acc.refreshToken === 'string' ? acc.refreshToken : '';
+      const connected = provider === 'yahoo'
+        ? keepSignedIn && (tokenStillValid(session) || Boolean(refreshToken))
+        : keepSignedIn && scopeMatches && tokenStillValid(session);
       return {
         id: String(acc.id || `acc_${index + 1}`),
         name: String(acc.name || `Inbox ${index + 1}`),
         email: String(acc.email || ''),
         color: ACCOUNT_COLORS[index % ACCOUNT_COLORS.length],
         allowed: acc.allowed !== false,
+        provider,
+        refreshToken,
         connected,
-        token: connected ? token : null,
-        tokenExpiresAt: connected ? tokenExpiresAt : 0,
+        token: tokenStillValid(session) && (provider === 'yahoo' || scopeMatches) ? token : null,
+        tokenExpiresAt: tokenStillValid(session) && (provider === 'yahoo' || scopeMatches) ? tokenExpiresAt : 0,
         keepSignedIn
       };
     });
@@ -113,8 +147,10 @@ function persistAccounts(accounts) {
       name: acc.name,
       email: acc.email,
       allowed: acc.allowed !== false,
+      provider: acc.provider === 'yahoo' ? 'yahoo' : 'google',
+      refreshToken: acc.provider === 'yahoo' ? (acc.refreshToken || '') : '',
       keepSignedIn: Boolean(acc.keepSignedIn),
-      grantedScope: valid ? GMAIL_SCOPE : '',
+      grantedScope: acc.provider === 'yahoo' ? '' : (valid ? GMAIL_SCOPE : ''),
       token: valid ? acc.token : null,
       tokenExpiresAt: valid ? acc.tokenExpiresAt : 0
     };
@@ -123,7 +159,7 @@ function persistAccounts(accounts) {
 }
 
 function signedOutAccount(acc) {
-  return { ...acc, connected: false, token: null, tokenExpiresAt: 0, keepSignedIn: false };
+  return { ...acc, connected: false, token: null, tokenExpiresAt: 0, keepSignedIn: false, refreshToken: '' };
 }
 
 function prefersRedirectSignIn() {
@@ -153,6 +189,9 @@ export default function App() {
   const [pendingDeleteColumn, setPendingDeleteColumn] = useState(null);
   const [isDeletingColumn, setIsDeletingColumn] = useState(false);
   const [clientId, setClientId] = useState(loadClientId);
+  const [setupProvider, setSetupProvider] = useState(SETUP_TABS[0].id);
+  const [yahooClientId, setYahooClientId] = useState(() => loadStoredCredential(YAHOO_CLIENT_ID_KEY));
+  const [yahooClientSecret, setYahooClientSecret] = useState(() => loadStoredCredential(YAHOO_CLIENT_SECRET_KEY));
   const [gsiReady, setGsiReady] = useState(false);
   const accountsRef = useRef(accounts);
   const restoredForClient = useRef('');
@@ -185,6 +224,15 @@ export default function App() {
       // Ignore storage failures; the in-memory value still works for this visit.
     }
   }, [clientId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(YAHOO_CLIENT_ID_KEY, compactCredential(yahooClientId));
+      localStorage.setItem(YAHOO_CLIENT_SECRET_KEY, compactCredential(yahooClientSecret));
+    } catch {
+      // Ignore storage failures; the in-memory values still work for this visit.
+    }
+  }, [yahooClientId, yahooClientSecret]);
 
   // Sync dark mode class with standard root element
   useEffect(() => {
@@ -274,21 +322,54 @@ export default function App() {
   requestGoogleTokenRef.current = requestGoogleToken;
 
   // Initiate OAuth Sign-In for a specific account
+  const openSetup = (providerId) => {
+    if (SETUP_TABS.some((provider) => provider.id === providerId)) {
+      setSetupProvider(providerId);
+    }
+    setShowConfigModal(true);
+  };
+
   const handleConnectAccount = (accountEmail, accountId) => {
     const account = accounts.find(acc => acc.id === accountId);
-    if (!normalizeClientId(clientId).endsWith('.apps.googleusercontent.com')) {
-      setShowConfigModal(true);
-      setApiError('Paste the Web client ID from Google Cloud. It ends in .apps.googleusercontent.com.');
-      return;
-    }
+    const provider = mailProvider(accountEmail);
     if (!account?.allowed) {
-      setShowConfigModal(true);
+      openSetup('accounts');
       setApiError('Allow this inbox before connecting.');
       return;
     }
     if (!accountEmail) {
-      setShowConfigModal(true);
-      setApiError('Enter a Gmail address for this inbox before connecting.');
+      openSetup('accounts');
+      setApiError('Enter an email address for this inbox before connecting.');
+      return;
+    }
+    if (provider === 'yahoo') {
+      if (!compactCredential(yahooClientId) || !compactCredential(yahooClientSecret)) {
+        openSetup('yahoo');
+        setApiError('Paste the Yahoo Client ID and Client Secret in Setup.');
+        return;
+      }
+      sessionStorage.setItem(YAHOO_PENDING_KEY, JSON.stringify({ id: account.id, email: accountEmail }));
+      const params = new URLSearchParams({
+        client_id: compactCredential(yahooClientId),
+        redirect_uri: oauthRedirectUri(),
+        response_type: 'code',
+        scope: 'openid email mail-w',
+        state: account.id
+      });
+      window.location.assign(`https://api.login.yahoo.com/oauth2/request_auth?${params.toString()}`);
+      return;
+    }
+    if (provider === 'microsoft') {
+      setApiError('Outlook and Hotmail are not connected yet.');
+      return;
+    }
+    if (provider !== 'google') {
+      setApiError('This address is not a Gmail or Yahoo mailbox.');
+      return;
+    }
+    if (!normalizeClientId(clientId).endsWith('.apps.googleusercontent.com')) {
+      openSetup('google');
+      setApiError('Paste the Web client ID from Google Cloud. It ends in .apps.googleusercontent.com.');
       return;
     }
     if (prefersRedirectSignIn()) {
@@ -313,7 +394,7 @@ export default function App() {
     if (!gsiReady || !activeClientId || restoredForClient.current === activeClientId) return;
     restoredForClient.current = activeClientId;
     accountsRef.current.forEach((acc) => {
-      if (!acc.allowed || !acc.email || !acc.keepSignedIn) return;
+      if (!acc.allowed || !acc.email || !acc.keepSignedIn || acc.provider === 'yahoo') return;
       if (tokenStillValid(acc)) {
         fetchRealEmailsForAccount(acc.id, acc.email, acc.token);
         return;
@@ -329,7 +410,7 @@ export default function App() {
     const renewExpiredSessions = () => {
       if (document.visibilityState === 'hidden') return;
       accountsRef.current.forEach((acc) => {
-        if (!acc.allowed || !acc.email || !acc.keepSignedIn) return;
+        if (!acc.allowed || !acc.email || !acc.keepSignedIn || acc.provider === 'yahoo') return;
         const expiresSoon = !tokenStillValid(acc) || acc.tokenExpiresAt - Date.now() < 5 * 60 * 1000;
         if (!expiresSoon) return;
         const lastAttempt = silentAttemptAt.current[acc.id] || 0;
@@ -463,10 +544,68 @@ export default function App() {
     };
   };
 
+  const applyYahooMessages = (accountId, messages) => {
+    const tagged = (messages || []).map(msg => ({ ...msg, accountId, provider: 'yahoo' }));
+    setEmails(prev => {
+      const others = prev.filter(email => email.accountId !== accountId);
+      return [...others, ...tagged].sort((a, b) => b.internalDate - a.internalDate);
+    });
+  };
+
+  const rememberYahooSession = (accountId, email, data) => {
+    const seconds = Number(data.expiresIn) > 0 ? Number(data.expiresIn) : 3600;
+    setAccounts(prev => prev.map(acc => acc.id === accountId ? {
+      ...acc,
+      email: email || acc.email,
+      provider: 'yahoo',
+      connected: true,
+      keepSignedIn: true,
+      token: data.accessToken || acc.token,
+      refreshToken: data.refreshToken || acc.refreshToken || '',
+      tokenExpiresAt: data.expiresIn ? Date.now() + seconds * 1000 : acc.tokenExpiresAt
+    } : acc));
+  };
+
+  const loadYahooMailbox = async (account, extra = {}) => {
+    const clientIdValue = compactCredential(yahooClientId);
+    const clientSecretValue = compactCredential(yahooClientSecret);
+    if (!clientIdValue || !clientSecretValue) {
+      throw new Error('Paste the Yahoo Client ID and Client Secret in Setup.');
+    }
+    const useCode = Boolean(extra.code);
+    const res = await fetch('/api/yahoo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: extra.action || 'list',
+        clientId: clientIdValue,
+        clientSecret: clientSecretValue,
+        email: account.email,
+        redirectUri: oauthRedirectUri(),
+        code: useCode ? extra.code : '',
+        refreshToken: useCode ? '' : (account.refreshToken || ''),
+        accessToken: useCode || !tokenStillValid(account) ? '' : (account.token || ''),
+        messageId: extra.messageId || '',
+        starred: Boolean(extra.starred)
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401) {
+        setAccounts(prev => prev.map(acc => acc.id === account.id ? signedOutAccount(acc) : acc));
+      }
+      throw new Error(data.error || 'Yahoo mail request failed.');
+    }
+    rememberYahooSession(account.id, account.email, data);
+    if (!extra.action || extra.action === 'list') applyYahooMessages(account.id, data.messages || []);
+    setLastSynced(new Date().toLocaleTimeString());
+    return data;
+  };
+
   const handleRefreshAll = () => {
     setIsRefreshing(true);
-    const connectedAccounts = accounts.filter(a => a.connected && a.token);
-    
+    const connectedAccounts = accounts.filter(acc => acc.connected && (acc.token || acc.refreshToken));
+
     if (connectedAccounts.length === 0) {
       setTimeout(() => {
         setLastSynced(new Date().toLocaleTimeString());
@@ -476,12 +615,54 @@ export default function App() {
     }
 
     Promise.all(
-      connectedAccounts.map(acc => fetchRealEmailsForAccount(acc.id, acc.email, acc.token))
+      connectedAccounts.map(acc => acc.provider === 'yahoo'
+        ? loadYahooMailbox(acc).catch(err => setApiError(err.message))
+        : fetchRealEmailsForAccount(acc.id, acc.email, acc.token))
     ).finally(() => {
       setIsRefreshing(false);
       setLastSynced(new Date().toLocaleTimeString());
     });
   };
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const oauthError = params.get('error');
+    if (!code && !oauthError) {
+      accountsRef.current.forEach((acc) => {
+        if (acc.provider !== 'yahoo' || !acc.allowed || !acc.email || !acc.keepSignedIn) return;
+        if (!acc.refreshToken && !tokenStillValid(acc)) return;
+        loadYahooMailbox(acc).catch(err => setApiError(err.message));
+      });
+      return;
+    }
+    const state = params.get('state');
+    window.history.replaceState(null, '', window.location.pathname);
+    let pending = null;
+    try {
+      pending = JSON.parse(sessionStorage.getItem(YAHOO_PENDING_KEY) || 'null');
+    } catch {
+      pending = null;
+    }
+    sessionStorage.removeItem(YAHOO_PENDING_KEY);
+    if (oauthError) {
+      setApiError(oauthError === 'access_denied'
+        ? 'Yahoo has not enabled mail access for this app yet.'
+        : `Yahoo sign-in failed: ${oauthError}`);
+      return;
+    }
+    const saved = accountsRef.current.find(acc => acc.id === state);
+    const email = saved?.email || pending?.email || '';
+    const accountId = saved?.id || pending?.id || state;
+    if (!email || !accountId) {
+      setApiError('Yahoo sign-in did not return an inbox to connect.');
+      return;
+    }
+    loadYahooMailbox({ id: accountId, email, refreshToken: '', token: '', tokenExpiresAt: 0 }, { code })
+      .catch(err => setApiError(err.message));
+    // Yahoo returns once on this page load. Credentials come from the first render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const updateAccount = (id, patch) => {
     const current = accounts.find(acc => acc.id === id);
@@ -495,6 +676,7 @@ export default function App() {
         next.token = null;
         next.tokenExpiresAt = 0;
         next.keepSignedIn = false;
+        next.refreshToken = '';
       }
       return next;
     }));
@@ -521,7 +703,7 @@ export default function App() {
   const toggleStar = async (e, id) => {
     e.stopPropagation();
     const email = emails.find(item => item.id === id) || (selectedEmail?.id === id ? selectedEmail : null);
-    const account = accounts.find(acc => acc.id === email?.accountId && acc.token);
+    const account = accounts.find(acc => acc.id === email?.accountId && (acc.token || (acc.provider === 'yahoo' && acc.refreshToken)));
     if (!email || !account) {
       setApiError('Connect this inbox again before starring mail.');
       return;
@@ -529,6 +711,15 @@ export default function App() {
     const nextStarred = !email.starred;
     const nextCategory = email.category === 'Spam' ? 'Spam' : (nextStarred ? 'Action needed' : email.category);
     applyStarState(id, nextStarred, nextCategory);
+    if (email.provider === 'yahoo' || String(id).startsWith('yahoo:')) {
+      try {
+        await loadYahooMailbox(account, { action: 'star', messageId: id, starred: nextStarred });
+      } catch (err) {
+        applyStarState(id, email.starred, email.category);
+        setApiError(err.message);
+      }
+      return;
+    }
     try {
       const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/modify`, {
         method: 'POST',
@@ -565,9 +756,19 @@ export default function App() {
   const deleteEmail = async (e, id) => {
     e.stopPropagation();
     const email = emails.find(item => item.id === id);
-    const account = accounts.find(acc => acc.id === email?.accountId && acc.token);
+    const account = accounts.find(acc => acc.id === email?.accountId && (acc.token || (acc.provider === 'yahoo' && acc.refreshToken)));
     if (!account) {
       setApiError('Connect this inbox again before moving mail to Trash.');
+      return;
+    }
+    if (email?.provider === 'yahoo' || String(id).startsWith('yahoo:')) {
+      try {
+        await loadYahooMailbox(account, { action: 'trash', messageId: id });
+        setEmails(prev => prev.filter(item => item.id !== id));
+        if (selectedEmail?.id === id) setSelectedEmail(null);
+      } catch (err) {
+        setApiError(err.message);
+      }
       return;
     }
     try {
@@ -624,7 +825,7 @@ export default function App() {
     const authFailed = [];
 
     await Promise.all([...groups.entries()].map(async ([accountId, ids]) => {
-      const account = accountsRef.current.find(acc => acc.id === accountId && acc.token);
+      const account = accountsRef.current.find(acc => acc.id === accountId && (acc.token || (acc.provider === 'yahoo' && acc.refreshToken)));
       if (!account) {
         missingAccount.push(...ids);
         return;
@@ -635,6 +836,16 @@ export default function App() {
         while (queue.length) {
           const id = queue.shift();
           if (blocked) return;
+          const target = emails.find(item => item.id === id && item.accountId === accountId);
+          if (account.provider === 'yahoo' || (target && target.provider === 'yahoo') || String(id).startsWith('yahoo:')) {
+            try {
+              await loadYahooMailbox(account, { action: 'trash', messageId: id });
+              trashed.add(`${accountId}:${id}`);
+            } catch {
+              failed.push(`${accountId}:${id}`);
+            }
+            return;
+          }
           try {
             const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/trash`, {
               method: 'POST',
@@ -727,7 +938,7 @@ export default function App() {
             </div>
             <div className="min-w-0">
               <h1 className="font-extrabold text-sm sm:text-lg tracking-tight leading-tight truncate bg-gradient-to-r from-blue-500 to-indigo-400 bg-clip-text text-transparent">
-                Multi-Inbox Gmail Dashboard
+                Multi-Inbox Dashboard
               </h1>
               <p className="hidden sm:block text-[11px] text-slate-500 dark:text-slate-400">Targeted Multi-Account Streams</p>
             </div>
@@ -998,25 +1209,125 @@ export default function App() {
             </div>
 
             <div className="py-4 space-y-4 text-xs overflow-y-auto">
-              <label className="block space-y-1.5">
-                <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">Google client ID</span>
-                <textarea
-                  value={clientId}
-                  onChange={(e) => setClientId(normalizeClientId(e.target.value))}
-                  placeholder="1234567890-abc.apps.googleusercontent.com"
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck="false"
-                  rows={3}
-                  aria-label="Google client ID"
-                  className={`w-full px-3 py-2 text-base sm:text-sm font-mono leading-relaxed break-all rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 resize-y ${
-                    darkMode ? 'bg-slate-950 border-slate-700 text-amber-200 placeholder-slate-600' : 'bg-slate-50 border-slate-300 text-slate-900'
-                  }`}
-                />
-                <span className="block text-[11px] text-slate-400">Enter this once. It stays in this browser and is not read from an env file.</span>
-              </label>
+              <div
+                role="tablist"
+                aria-label="Setup"
+                className={`flex gap-1 p-1 rounded-xl border ${darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'}`}
+                onKeyDown={(event) => {
+                  if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+                  event.preventDefault();
+                  const index = SETUP_TABS.findIndex((provider) => provider.id === setupProvider);
+                  const step = event.key === 'ArrowRight' ? 1 : -1;
+                  const next = SETUP_TABS[(index + step + SETUP_TABS.length) % SETUP_TABS.length];
+                  setSetupProvider(next.id);
+                  event.currentTarget.querySelector(`#setup-tab-${next.id}`)?.focus();
+                }}
+              >
+                {SETUP_TABS.map((provider) => {
+                  const selected = setupProvider === provider.id;
+                  return (
+                    <button
+                      key={provider.id}
+                      id={`setup-tab-${provider.id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      aria-controls={`setup-panel-${provider.id}`}
+                      tabIndex={selected ? 0 : -1}
+                      onClick={() => setSetupProvider(provider.id)}
+                      className={`flex-1 min-w-0 min-h-11 px-2 py-2 rounded-lg text-xs sm:text-sm font-bold whitespace-nowrap transition-colors ${
+                        selected
+                          ? darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white text-slate-900 shadow-sm'
+                          : darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      {provider.label}
+                    </button>
+                  );
+                })}
+              </div>
 
+              {setupProvider === 'google' && (
+                <div id="setup-panel-google" role="tabpanel" aria-labelledby="setup-tab-google" className="space-y-4">
+                  <label className="block space-y-1.5">
+                    <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">Google client ID</span>
+                    <textarea
+                      value={clientId}
+                      onChange={(e) => setClientId(normalizeClientId(e.target.value))}
+                      placeholder="1234567890-abc.apps.googleusercontent.com"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck="false"
+                      rows={3}
+                      aria-label="Google client ID"
+                      className={`w-full px-3 py-2 text-base sm:text-sm font-mono leading-relaxed break-all rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 resize-y ${
+                        darkMode ? 'bg-slate-950 border-slate-700 text-amber-200 placeholder-slate-600' : 'bg-slate-50 border-slate-300 text-slate-900'
+                      }`}
+                    />
+                    <span className="block text-[11px] text-slate-400">Enter this once. It stays in this browser and is not read from an env file. Gmail addresses use it.</span>
+                  </label>
+                  <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2">
+                    <h4 className="font-bold text-amber-400">Google Cloud checklist</h4>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px] leading-relaxed">
+                      <li>Enable the <strong>Gmail API</strong> on the same Google Cloud project as the client ID.</li>
+                      <li>Add every allowed Gmail address under <strong>OAuth consent screen &gt; Test users</strong> while the app is in testing.</li>
+                      <li>On that same Web client, add <span className="font-mono">https://gmail-dashboard-red.vercel.app</span> under <strong>Authorized JavaScript origins</strong>, and <span className="font-mono">https://gmail-dashboard-red.vercel.app/</span> under <strong>Authorized redirect URIs</strong>.</li>
+                    </ol>
+                  </div>
+                </div>
+              )}
+
+              {setupProvider === 'yahoo' && (
+                <div id="setup-panel-yahoo" role="tabpanel" aria-labelledby="setup-tab-yahoo" className="space-y-4">
+                  <label className="block space-y-1.5">
+                    <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">Yahoo client ID</span>
+                    <textarea
+                      value={yahooClientId}
+                      onChange={(e) => setYahooClientId(compactCredential(e.target.value))}
+                      placeholder="Yahoo Client ID"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck="false"
+                      rows={2}
+                      aria-label="Yahoo client ID"
+                      className={`w-full px-3 py-2 text-base sm:text-sm font-mono leading-relaxed break-all rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 resize-y ${
+                        darkMode ? 'bg-slate-950 border-slate-700 text-amber-200 placeholder-slate-600' : 'bg-slate-50 border-slate-300 text-slate-900'
+                      }`}
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">Yahoo client secret</span>
+                    <textarea
+                      value={yahooClientSecret}
+                      onChange={(e) => setYahooClientSecret(compactCredential(e.target.value))}
+                      placeholder="Yahoo Client Secret"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck="false"
+                      rows={2}
+                      aria-label="Yahoo client secret"
+                      className={`w-full px-3 py-2 text-base sm:text-sm font-mono leading-relaxed break-all rounded-lg border focus:outline-none focus:ring-2 focus:ring-amber-500 resize-y ${
+                        darkMode ? 'bg-slate-950 border-slate-700 text-amber-200 placeholder-slate-600' : 'bg-slate-50 border-slate-300 text-slate-900'
+                      }`}
+                    />
+                    <span className="block text-[11px] text-slate-400">Yahoo addresses use these. They stay in this browser. The secret is sent only to this app so it can sign in to Yahoo. It is not stored in the repo.</span>
+                  </label>
+                  <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2">
+                    <h4 className="font-bold text-amber-400">Yahoo checklist</h4>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px] leading-relaxed">
+                      <li>Paste the Yahoo Client ID and secret above. Connect sends a Yahoo address to Yahoo.</li>
+                      <li>Register <span className="font-mono">https://gmail-dashboard-red.vercel.app/</span> as the redirect URI on the Yahoo app.</li>
+                      <li>Inbox and Spam load after Yahoo approves mail access.</li>
+                    </ol>
+                  </div>
+                </div>
+              )}
+
+              {setupProvider === 'accounts' && (
+              <div id="setup-panel-accounts" role="tabpanel" aria-labelledby="setup-tab-accounts" className="space-y-4">
               <div className="space-y-2">
                 {accounts.map(acc => (
                   <div key={acc.id} className={`p-3 rounded-xl border space-y-2 ${darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
@@ -1050,7 +1361,7 @@ export default function App() {
                       type="email"
                       value={acc.email}
                       onChange={(e) => updateAccount(acc.id, { email: e.target.value })}
-                      placeholder="you@gmail.com"
+                      placeholder="you@gmail.com or you@yahoo.com"
                       aria-label={`${acc.name} Gmail address`}
                       className={`w-full px-3 py-2.5 text-base sm:text-xs font-mono rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                         darkMode ? 'bg-slate-900 border-slate-700 text-slate-100 placeholder-slate-500' : 'bg-white border-slate-300 text-slate-900'
@@ -1066,15 +1377,8 @@ export default function App() {
               >
                 <Plus className="w-3.5 h-3.5" /> Add inbox
               </button>
-
-              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2">
-                <h4 className="font-bold text-amber-400">Google Cloud checklist</h4>
-                <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px] leading-relaxed">
-                  <li>Enable the <strong>Gmail API</strong> on the same Google Cloud project as the client ID.</li>
-                  <li>Add every allowed Gmail address under <strong>OAuth consent screen &gt; Test users</strong> while the app is in testing.</li>
-                  <li>On that same Web client, add <span className="font-mono">https://gmail-dashboard-red.vercel.app</span> under <strong>Authorized JavaScript origins</strong>, and <span className="font-mono">https://gmail-dashboard-red.vercel.app/</span> under <strong>Authorized redirect URIs</strong>.</li>
-                </ol>
               </div>
+              )}
             </div>
 
             <div className="pt-3 border-t border-slate-800 flex justify-end">
