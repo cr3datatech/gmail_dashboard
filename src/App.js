@@ -330,6 +330,7 @@ export default function App() {
   };
 
   const handleConnectAccount = (accountEmail, accountId) => {
+    setApiError(null);
     const account = accounts.find(acc => acc.id === accountId);
     const provider = mailProvider(accountEmail);
     if (!account?.allowed) {
@@ -459,7 +460,6 @@ export default function App() {
   // Fetch recent inbox mail and the spam folder. Each list is capped at 25.
   const fetchRealEmailsForAccount = async (accountId, accountEmail, accessToken) => {
     setIsRefreshing(true);
-    setApiError(null);
     try {
       const [inboxResult, spamResult] = await Promise.all([
         listRecentMessages(accessToken, 'in:inbox newer_than:30d').then(messages => ({ messages })).catch(err => ({ err })),
@@ -603,6 +603,7 @@ export default function App() {
   };
 
   const handleRefreshAll = () => {
+    setApiError(null);
     setIsRefreshing(true);
     const connectedAccounts = accounts.filter(acc => acc.connected && (acc.token || acc.refreshToken));
 
